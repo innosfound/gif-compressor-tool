@@ -8,7 +8,7 @@ MAX_FILE_SIZE = 10 * 1024 * 1024
 
 def process_and_compress_image(url):
     """
-    流暢度優先：精準計算每幀時間，優先使用色彩壓縮，最後才使用抽幀。
+    流暢度優先 ＋ 解決閃爍 Bug：統一調色盤並去除透明背景干擾。
     """
     try:
         # 1. 下載圖片
@@ -22,13 +22,20 @@ def process_and_compress_image(url):
         original_size_mb = len(response.content) / (1024 * 1024)
         st.write(f"📥 成功讀取！格式: `{img.format}` | 原始大小: `{original_size_mb:.2f} MB`")
         
-        # 2. 提取所有影格，並且「精準記錄每一格的播放時間」
+        # 2. 提取所有影格，並墊上「純白背景」以防止透明度導致的閃爍
         frames = []
-        durations = [] # 新增：用來記錄每格的時間
+        durations = []
         try:
             while True:
-                frames.append(img.copy().convert('RGBA'))
-                # 抓取這格的時間，如果沒有就預設 100 毫秒
+                # 將每一格轉為 RGBA 提取出來
+                f_rgba = img.copy().convert('RGBA')
+                
+                # 建立一張純白色的底圖
+                white_bg = Image.new("RGB", f_rgba.size, (255, 255, 255))
+                # 將原圖貼在白底上 (利用自身的 alpha 色版當作遮罩)
+                white_bg.paste(f_rgba, mask=f_rgba.split()[3])
+                
+                frames.append(white_bg)
                 durations.append(img.info.get('duration', 100)) 
                 img.seek(len(frames))
         except EOFError:
@@ -37,15 +44,14 @@ def process_and_compress_image(url):
         if original_size_mb <= 10 and img.format == 'GIF':
             return response.content, original_size_mb
 
-        st.write("⚙️ 啟動「流暢度優先」智慧壓縮引擎...")
+        st.write("⚙️ 啟動「防閃爍」智慧壓縮引擎...")
 
-        # 重新排列策略：優先降色彩保流暢，最後才抽幀
         strategies = [
-            {"drop_frames": False, "colors": 128}, # 策略 1: 全幀 + 128色 (通常這步就能成功)
-            {"drop_frames": False, "colors": 64},  # 策略 2: 全幀 + 64色
-            {"drop_frames": True,  "colors": 256}, # 策略 3: 抽幀 + 256色
-            {"drop_frames": True,  "colors": 128}, # 策略 4: 抽幀 + 128色
-            {"drop_frames": True,  "colors": 64}   # 策略 5: 抽幀 + 64色
+            {"drop_frames": False, "colors": 128},
+            {"drop_frames": False, "colors": 64},
+            {"drop_frames": True,  "colors": 256},
+            {"drop_frames": True,  "colors": 128},
+            {"drop_frames": True,  "colors": 64}
         ]
         
         output_io = BytesIO()
@@ -57,10 +63,8 @@ def process_and_compress_image(url):
             if strategy["drop_frames"]:
                 current_frames = []
                 current_durations = []
-                # 重新計算抽幀後的時間，確保播放速度不變
                 for i in range(0, len(frames), 2):
                     current_frames.append(frames[i])
-                    # 把這格的時間，加上被抽掉的下一格的時間
                     dur = durations[i]
                     if i + 1 < len(durations):
                         dur += durations[i+1]
@@ -74,12 +78,15 @@ def process_and_compress_image(url):
             colors = strategy["colors"]
             step_name += f" + 色彩數:{colors}"
             
-            processed_frames = [
-                f.convert("P", palette=Image.ADAPTIVE, colors=colors) 
-                for f in current_frames
-            ]
+            # 💡 核心修復：統一調色盤
+            # 先將第一格轉換為指定色彩數，並取得它的調色盤
+            first_frame_quantized = current_frames[0].quantize(colors=colors, method=Image.Quantize.MAXCOVERAGE)
+            
+            processed_frames = [first_frame_quantized]
+            # 強制後續所有的影格，都套用第一格的調色盤！(dither=NONE 避免產生顆粒狀噪點)
+            for f in current_frames[1:]:
+                processed_frames.append(f.quantize(palette=first_frame_quantized, dither=Image.Dither.NONE))
 
-            # 儲存 GIF，這次我們傳入的是一個包含每個影格精確時間的「列表 (current_durations)」
             processed_frames[0].save(
                 temp_io,
                 format='GIF',
@@ -98,7 +105,7 @@ def process_and_compress_image(url):
                 st.write(f"✅ 成功命中目標！使用策略：`{step_name}`")
                 break
             else:
-                st.write(f"⏳ 嘗試策略 `{step_name}`... 大小 {current_size_mb:.2f} MB (仍過大)")
+                st.write(f"⏳ 嘗試策略 `{step_name}`... 大小 {current_size_mb:.2f} MB")
                 
                 if step == len(strategies) - 1:
                     output_io = temp_io
