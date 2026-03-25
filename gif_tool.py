@@ -6,7 +6,7 @@ from PIL import Image
 def process_and_compress_image(url, target_size_mb):
     """
     流暢度優先：精準計算每幀時間，優先使用色彩壓縮，最後才使用抽幀。
-    新增了 target_size_mb 參數來動態決定目標壓縮大小。
+    支援動態目標大小，並使用全局色板防止低色彩時破圖閃爍。
     """
     try:
         # 1. 下載圖片
@@ -22,29 +22,27 @@ def process_and_compress_image(url, target_size_mb):
         
         # 2. 提取所有影格，並且「精準記錄每一格的播放時間」
         frames = []
-        durations = [] # 新增：用來記錄每格的時間
+        durations = [] 
         try:
             while True:
+                # 這裡保留 RGBA，我們在壓縮階段再做安全處理
                 frames.append(img.copy().convert('RGBA'))
-                # 抓取這格的時間，如果沒有就預設 100 毫秒
                 durations.append(img.info.get('duration', 100)) 
                 img.seek(len(frames))
         except EOFError:
             pass
         
-        # 檢查原始大小是否已經小於我們設定的「目標大小」
         if original_size_mb <= target_size_mb and img.format == 'GIF':
             return response.content, original_size_mb
 
         st.write(f"⚙️ 啟動「流暢度優先」智慧壓縮引擎 (目標: {target_size_mb}MB 以下)...")
 
-        # 重新排列策略：優先降色彩保流暢，最後才抽幀 (保留原設定)
         strategies = [
-            {"drop_frames": False, "colors": 128}, # 策略 1: 全幀 + 128色 
-            {"drop_frames": False, "colors": 64},  # 策略 2: 全幀 + 64色
-            {"drop_frames": True,  "colors": 256}, # 策略 3: 抽幀 + 256色
-            {"drop_frames": True,  "colors": 128}, # 策略 4: 抽幀 + 128色
-            {"drop_frames": True,  "colors": 64}   # 策略 5: 抽幀 + 64色
+            {"drop_frames": False, "colors": 128},
+            {"drop_frames": False, "colors": 64}, 
+            {"drop_frames": True,  "colors": 256},
+            {"drop_frames": True,  "colors": 128},
+            {"drop_frames": True,  "colors": 64}  
         ]
         
         output_io = BytesIO()
@@ -56,10 +54,8 @@ def process_and_compress_image(url, target_size_mb):
             if strategy["drop_frames"]:
                 current_frames = []
                 current_durations = []
-                # 重新計算抽幀後的時間，確保播放速度不變
                 for i in range(0, len(frames), 2):
                     current_frames.append(frames[i])
-                    # 把這格的時間，加上被抽掉的下一格的時間
                     dur = durations[i]
                     if i + 1 < len(durations):
                         dur += durations[i+1]
@@ -73,15 +69,30 @@ def process_and_compress_image(url, target_size_mb):
             colors = strategy["colors"]
             step_name += f" + 色彩數:{colors}"
             
-            # --- 【關鍵修正區塊】解決 5MB 破圖與閃爍問題 ---
-            # 1. 讓第一張影格決定整張 GIF 的「統一色板 (Global Palette)」
-            base_frame = current_frames[0].convert("P", palette=Image.ADAPTIVE, colors=colors, dither=Image.NONE)
-            processed_frames = [base_frame]
+            # === 【修復閃爍與 RGBA 報錯的核心區塊】 ===
+            processed_frames = []
             
-            # 2. 強制後續所有影格都套用同一個色板 (dither=0 代表關閉抖動)
+            # 輔助函式：將 RGBA 安全轉為 RGB（透明部分預設補上白色底）
+            def safe_convert_to_rgb(img_frame):
+                if img_frame.mode == 'RGBA':
+                    # 建立一張純白背景
+                    bg = Image.new("RGB", img_frame.size, (255, 255, 255))
+                    # 將原圖貼上，並使用自身的透明通道作為遮罩
+                    bg.paste(img_frame, mask=img_frame.split()[3])
+                    return bg
+                return img_frame.convert("RGB")
+
+            # 1. 處理第一幀作為「統一色板」
+            first_frame_rgb = safe_convert_to_rgb(current_frames[0])
+            base_frame = first_frame_rgb.convert("P", palette=Image.ADAPTIVE, colors=colors, dither=Image.NONE)
+            processed_frames.append(base_frame)
+            
+            # 2. 處理後續幀並強制對齊第一幀的色板
             for f in current_frames[1:]:
-                processed_frames.append(f.quantize(palette=base_frame, dither=0))
-            # ----------------------------------------------
+                f_rgb = safe_convert_to_rgb(f)
+                # 使用 quantize 搭配 base_frame 的色板，dither=0 關閉像素抖動
+                processed_frames.append(f_rgb.quantize(palette=base_frame, dither=0))
+            # ==============================================
 
             # 儲存 GIF
             processed_frames[0].save(
@@ -96,7 +107,6 @@ def process_and_compress_image(url, target_size_mb):
             
             current_size_mb = temp_io.tell() / (1024 * 1024)
             
-            # 檢查當前大小是否達成「目標大小」
             if current_size_mb <= target_size_mb:
                 output_io = temp_io
                 final_size_mb = current_size_mb
@@ -125,19 +135,17 @@ st.markdown("""
 
 url_input = st.text_input("請貼上 GIF 或 WebP 的網址：")
 
-# --- 新增的選擇按鈕區塊 ---
+# 選項按鈕區塊
 target_size_option = st.radio(
     "📏 請選擇目標壓縮大小：",
     options=[10, 5],
     format_func=lambda x: f"小於 {x} MB",
-    horizontal=True # 讓按鈕橫向排列，節省畫面空間
+    horizontal=True 
 )
-# ------------------------
 
 if st.button("開始處理"):
     if url_input:
         with st.spinner(f"正在執行抽幀與色彩壓縮 (目標：{target_size_option}MB)，請稍候..."):
-            # 將選擇的目標大小作為第二個參數傳遞進去
             final_gif_bytes, final_size_or_error = process_and_compress_image(url_input, target_size_option)
             
             if final_gif_bytes:
