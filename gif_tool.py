@@ -73,8 +73,9 @@ def process_and_compress_image(url, target_size_mb):
             colors = strategy["colors"]
             step_name += f" + 色彩數:{colors}"
             
+            # 新增了 dither=Image.NONE，強制關閉像素抖動，防止低色彩時破圖閃爍
             processed_frames = [
-                f.convert("P", palette=Image.ADAPTIVE, colors=colors) 
+                f.convert("P", palette=Image.ADAPTIVE, colors=colors, dither=Image.NONE) 
                 for f in current_frames
             ]
 
