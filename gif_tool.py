@@ -73,11 +73,15 @@ def process_and_compress_image(url, target_size_mb):
             colors = strategy["colors"]
             step_name += f" + 色彩數:{colors}"
             
-            # 新增了 dither=Image.NONE，強制關閉像素抖動，防止低色彩時破圖閃爍
-            processed_frames = [
-                f.convert("P", palette=Image.ADAPTIVE, colors=colors, dither=Image.NONE) 
-                for f in current_frames
-            ]
+            # --- 【關鍵修正區塊】解決 5MB 破圖與閃爍問題 ---
+            # 1. 讓第一張影格決定整張 GIF 的「統一色板 (Global Palette)」
+            base_frame = current_frames[0].convert("P", palette=Image.ADAPTIVE, colors=colors, dither=Image.NONE)
+            processed_frames = [base_frame]
+            
+            # 2. 強制後續所有影格都套用同一個色板 (dither=0 代表關閉抖動)
+            for f in current_frames[1:]:
+                processed_frames.append(f.quantize(palette=base_frame, dither=0))
+            # ----------------------------------------------
 
             # 儲存 GIF
             processed_frames[0].save(
