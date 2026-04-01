@@ -6,7 +6,7 @@ from PIL import Image
 def process_and_compress_image(url, target_size_mb):
     """
     流暢度優先：精準計算每幀時間，優先使用色彩壓縮，最後才使用抽幀。
-    支援動態目標大小，並使用全局色板防止低色彩時破圖閃爍。
+    支援動態目標大小，並使用中間幀做全局色板防止低色彩時破圖與顏色失真。
     """
     try:
         # 1. 下載圖片
@@ -69,7 +69,7 @@ def process_and_compress_image(url, target_size_mb):
             colors = strategy["colors"]
             step_name += f" + 色彩數:{colors}"
             
-            # === 【修復閃爍與 RGBA 報錯的核心區塊】 ===
+            # === 【修復閃爍、RGBA 報錯與顏色走鐘的核心區塊】 ===
             processed_frames = []
             
             # 輔助函式：將 RGBA 安全轉為 RGB（透明部分預設補上白色底）
@@ -82,13 +82,13 @@ def process_and_compress_image(url, target_size_mb):
                     return bg
                 return img_frame.convert("RGB")
 
-            # 1. 處理第一幀作為「統一色板」
-            first_frame_rgb = safe_convert_to_rgb(current_frames[0])
-            base_frame = first_frame_rgb.convert("P", palette=Image.ADAPTIVE, colors=colors, dither=Image.NONE)
-            processed_frames.append(base_frame)
+            # 1. 改用「中間那一幀」來產生全局色板，準確抓取主要顏色！
+            middle_idx = len(current_frames) // 2
+            palette_frame_rgb = safe_convert_to_rgb(current_frames[middle_idx])
+            base_frame = palette_frame_rgb.convert("P", palette=Image.ADAPTIVE, colors=colors, dither=Image.NONE)
             
-            # 2. 處理後續幀並強制對齊第一幀的色板
-            for f in current_frames[1:]:
+            # 2. 強制所有影格（包含第一幀）都對齊這個中間幀的色板
+            for f in current_frames:
                 f_rgb = safe_convert_to_rgb(f)
                 # 使用 quantize 搭配 base_frame 的色板，dither=0 關閉像素抖動
                 processed_frames.append(f_rgb.quantize(palette=base_frame, dither=0))
