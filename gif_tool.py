@@ -6,7 +6,7 @@ from PIL import Image
 def process_and_compress_image(url, target_size_mb):
     """
     流暢度優先：精準計算每幀時間，優先使用色彩壓縮，最後才使用抽幀。
-    終極色彩修復：使用前、中、後三幀拼接產生「超級色板」，完美保留所有鮮豔色彩與漸層。
+    結合「超級色板」與「開啟像素抖動 (Dithering)」，完美消除色塊與斷層！
     """
     try:
         # 1. 下載圖片
@@ -20,7 +20,7 @@ def process_and_compress_image(url, target_size_mb):
         original_size_mb = len(response.content) / (1024 * 1024)
         st.write(f"📥 成功讀取！格式: `{img.format}` | 原始大小: `{original_size_mb:.2f} MB`")
         
-        # 2. 提取所有影格，並且「精準記錄每一格的播放時間」
+        # 2. 提取所有影格
         frames = []
         durations = [] 
         try:
@@ -68,7 +68,7 @@ def process_and_compress_image(url, target_size_mb):
             colors = strategy["colors"]
             step_name += f" + 色彩數:{colors}"
             
-            # === 【終極色彩修復：拼接超級色板】 ===
+            # === 【終極色彩修復：拼接超級色板 + 開啟像素抖動】 ===
             processed_frames = []
             
             def safe_convert_to_rgb(img_frame):
@@ -78,26 +78,27 @@ def process_and_compress_image(url, target_size_mb):
                     return bg
                 return img_frame.convert("RGB")
 
-            # 抓取三個最具代表性的時間點：開頭、中間、結尾
+            # 抓取三個最具代表性的時間點
             frame_count = len(current_frames)
             img_start = safe_convert_to_rgb(current_frames[0])
             img_mid = safe_convert_to_rgb(current_frames[frame_count // 2])
             img_end = safe_convert_to_rgb(current_frames[-1])
             
-            # 建立一張寬度是原本三倍的大畫布，把三張圖橫向拼在一起
+            # 建立三倍大圖
             w, h = img_start.size
             collage = Image.new("RGB", (w * 3, h))
             collage.paste(img_start, (0, 0))
             collage.paste(img_mid, (w, 0))
             collage.paste(img_end, (w * 2, 0))
             
-            # 讓這張包含「所有劇情場景」的大圖，來計算最完美的全局色板！
-            super_palette_img = collage.convert("P", palette=Image.ADAPTIVE, colors=colors, dither=Image.NONE)
+            # 產生超級色板
+            super_palette_img = collage.convert("P", palette=Image.ADAPTIVE, colors=colors)
             
-            # 強制所有影格對齊這個超級色板
+            # 強制所有影格對齊超級色板，【並重新開啟抖動 (dither=1)】來拯救漸層！
             for f in current_frames:
                 f_rgb = safe_convert_to_rgb(f)
-                processed_frames.append(f_rgb.quantize(palette=super_palette_img, dither=0))
+                # 修改這裡：把 dither=0 改成 dither=1
+                processed_frames.append(f_rgb.quantize(palette=super_palette_img, dither=1))
             # ==============================================
 
             # 儲存 GIF
