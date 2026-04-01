@@ -6,7 +6,7 @@ from PIL import Image
 def process_and_compress_image(url, target_size_mb):
     """
     流暢度優先：精準計算每幀時間，優先使用色彩壓縮，最後才使用抽幀。
-    支援動態目標大小，並使用中間幀做全局色板防止低色彩時破圖與顏色失真。
+    終極色彩修復：使用前、中、後三幀拼接產生「超級色板」，完美保留所有鮮豔色彩與漸層。
     """
     try:
         # 1. 下載圖片
@@ -25,7 +25,6 @@ def process_and_compress_image(url, target_size_mb):
         durations = [] 
         try:
             while True:
-                # 這裡保留 RGBA，我們在壓縮階段再做安全處理
                 frames.append(img.copy().convert('RGBA'))
                 durations.append(img.info.get('duration', 100)) 
                 img.seek(len(frames))
@@ -69,29 +68,36 @@ def process_and_compress_image(url, target_size_mb):
             colors = strategy["colors"]
             step_name += f" + 色彩數:{colors}"
             
-            # === 【修復閃爍、RGBA 報錯與顏色走鐘的核心區塊】 ===
+            # === 【終極色彩修復：拼接超級色板】 ===
             processed_frames = []
             
-            # 輔助函式：將 RGBA 安全轉為 RGB（透明部分預設補上白色底）
             def safe_convert_to_rgb(img_frame):
                 if img_frame.mode == 'RGBA':
-                    # 建立一張純白背景
                     bg = Image.new("RGB", img_frame.size, (255, 255, 255))
-                    # 將原圖貼上，並使用自身的透明通道作為遮罩
                     bg.paste(img_frame, mask=img_frame.split()[3])
                     return bg
                 return img_frame.convert("RGB")
 
-            # 1. 改用「中間那一幀」來產生全局色板，準確抓取主要顏色！
-            middle_idx = len(current_frames) // 2
-            palette_frame_rgb = safe_convert_to_rgb(current_frames[middle_idx])
-            base_frame = palette_frame_rgb.convert("P", palette=Image.ADAPTIVE, colors=colors, dither=Image.NONE)
+            # 抓取三個最具代表性的時間點：開頭、中間、結尾
+            frame_count = len(current_frames)
+            img_start = safe_convert_to_rgb(current_frames[0])
+            img_mid = safe_convert_to_rgb(current_frames[frame_count // 2])
+            img_end = safe_convert_to_rgb(current_frames[-1])
             
-            # 2. 強制所有影格（包含第一幀）都對齊這個中間幀的色板
+            # 建立一張寬度是原本三倍的大畫布，把三張圖橫向拼在一起
+            w, h = img_start.size
+            collage = Image.new("RGB", (w * 3, h))
+            collage.paste(img_start, (0, 0))
+            collage.paste(img_mid, (w, 0))
+            collage.paste(img_end, (w * 2, 0))
+            
+            # 讓這張包含「所有劇情場景」的大圖，來計算最完美的全局色板！
+            super_palette_img = collage.convert("P", palette=Image.ADAPTIVE, colors=colors, dither=Image.NONE)
+            
+            # 強制所有影格對齊這個超級色板
             for f in current_frames:
                 f_rgb = safe_convert_to_rgb(f)
-                # 使用 quantize 搭配 base_frame 的色板，dither=0 關閉像素抖動
-                processed_frames.append(f_rgb.quantize(palette=base_frame, dither=0))
+                processed_frames.append(f_rgb.quantize(palette=super_palette_img, dither=0))
             # ==============================================
 
             # 儲存 GIF
@@ -135,7 +141,6 @@ st.markdown("""
 
 url_input = st.text_input("請貼上 GIF 或 WebP 的網址：")
 
-# 選項按鈕區塊
 target_size_option = st.radio(
     "📏 請選擇目標壓縮大小：",
     options=[10, 5],
